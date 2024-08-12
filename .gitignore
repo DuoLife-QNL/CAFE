@@ -139,3 +139,5 @@ cython_debug/
 
 # Custom
 run_kaggle_pt/
+datasets
+.vscode/

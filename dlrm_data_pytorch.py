@@ -634,19 +634,33 @@ def make_criteo_data_and_loaders(args, offset_to_length_converter=False):
         # data_T = np.memmap("../criteo/kaggle_processed_label.bin", dtype = np.int32, mode = 'r', shape=(45840617,))
         # data_count = np.memmap("../criteo/origin/kaggle_processed_count.bin", dtype = np.int32, mode = 'r')
 
-        data_cat = np.memmap(args.cat_path, dtype=np.int32,
-                             mode='r', shape=(45840617, 26))
-        data_int = np.memmap(args.dense_path, dtype=np.float32,
-                             mode='r', shape=(45840617, 13))
-        data_T = np.memmap(args.label_path, dtype=np.int32,
-                           mode='r', shape=(45840617,))
-        data_count = np.memmap(
-            args.count_path, dtype=np.int32, mode='r', shape=(27, ))
+        # data_cat = np.memmap(args.cat_path, dtype=np.int32,
+        #                      mode='r', shape=(45840617, 26))
+        # data_int = np.memmap(args.dense_path, dtype=np.float32,
+        #                      mode='r', shape=(45840617, 13))
+        # data_T = np.memmap(args.label_path, dtype=np.int32,
+        #                    mode='r', shape=(45840617,))
+        # # data_count = np.memmap(
+        # #     args.count_path, dtype=np.int32, mode='r', shape=(27, ))
+        # data_count = np.memmap(
+        #     args.count_path, dtype=np.int32, mode='r', shape=(26, ))
+
+        # The stored file is from np.save(), which contains a header as the metadata. So we need to use the np.load(memmap_mode='r') to load the file.
+        data_cat = np.load(args.cat_path, mmap_mode='r')
+        data_int = np.load(args.dense_path, mmap_mode='r')
+        data_T = np.load(args.label_path, mmap_mode='r')
+        data_count = np.load(args.count_path, mmap_mode='r')
+        print('data_cat:')
+        print(data_cat)
+        # print(data_cat.shape, data_int.shape, data_T.shape, data_count.shape)
         hot_features = None
         count = np.array(data_count)
-        new_count = np.zeros(26)
-        for i in range(26):
-            new_count[i] = count[i+1] - count[i]
+        new_count = data_count
+        # The following handles an incrementally stored count file, yet our input is a definite count
+        # new_count
+        # new_count = np.zeros(26)
+        # for i in range(26):
+        #     new_count[i] = count[i+1] - count[i]
 
         # train_len = 45840617 * 6 // 7
         # if args.bucket_flag:

@@ -13,7 +13,6 @@ else
     dlrm_extra_option=""
 fi
 #echo $dlrm_extra_option
-
 CUDA_VISIBLE_DEVICES=0 \
 python dlrm_s_pytorch.py \
 --use-gpu \
@@ -27,13 +26,14 @@ python dlrm_s_pytorch.py \
 --learning-rate=0.1 \
 --mini-batch-size=128 \
 --print-freq=1024 \
+--nepochs=100 \
 --print-time \
 --test-mini-batch-size=16384 \
 --test-num-workers=16 \
---cat-path="/path/to/data" \
---dense-path="/path/to/data" \
---label-path="/path/to/data" \
---count-path="/path/to/data" \
+--cat-path="datasets/criteo_kaggle/cafe/data_cat.npy" \
+--dense-path="datasets/criteo_kaggle/cafe/data_int.npy" \
+--label-path="datasets/criteo_kaggle/cafe/data_label.npy" \
+--count-path="datasets/criteo_kaggle/cafe/data_count.npy" \
 $dlrm_extra_option 2>&1 | tee run_kaggle_pt.log
 
 echo "done"
