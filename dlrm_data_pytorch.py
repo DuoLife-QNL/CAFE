@@ -361,7 +361,7 @@ class KaggleDataset:
             for i in range(26):
                 if self.counts[i] > 2000 * self.compress_rate:
                     self.hash_size[i] = int(
-                        round(self.counts[i] * self.compress_rate * self.hash_rate + 0.55))
+                        round(self.counts[i] * self.compress_rate * self.hash_rate + 0.55)) # TODO: why + 0.55?
                     self.counts[i] = int(
                         self.hash_size[i] + len(self.hot_features[i]))
         print(f"count: {self.counts}, hash_size: {self.hash_size}")

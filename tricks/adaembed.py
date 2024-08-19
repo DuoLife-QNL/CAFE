@@ -193,8 +193,9 @@ class adaEmbeddingBag(nn.Module):
         self.num_categories = num_categories
         self.embedding_dim = embedding_dim
         self.device = device
-        self.hot_num = int((self.num_categories * embedding_dim *
-                           compress_rate - self.num_categories * 2) / self.embedding_dim)
+        # self.hot_num = int((self.num_categories * embedding_dim *
+        #                    compress_rate - self.num_categories * 2) / self.embedding_dim)
+        self.hot_num = int(self.num_categories * self.compress_rate)
         self.d_time = 0
         self.hot_rate = self.hot_num / self.num_categories
         self.avaible_set = np.arange(1, self.hot_num + 1)

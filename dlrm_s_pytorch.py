@@ -261,7 +261,8 @@ class DLRM_Net(nn.Module):
                 if ln[i] > 2000 * self.compress_rate:
                     N += ln[i]
             self.dic = np.zeros(N, dtype=np.int32)
-            self.hotn = int((N * m * self.compress_rate - N * 2) / m)
+            # self.hotn = int((N * m * self.compress_rate - N * 2) / m)
+            self.hotn = int(N * self.compress_rate)
             self.weight = Parameter(
                 torch.Tensor(self.hotn + 1, m),
                 requires_grad=True,
@@ -433,6 +434,7 @@ class DLRM_Net(nn.Module):
             self.hash_rate = hash_rate
             self.hotn = hotn
             self.grad_norm = []
+            # feature offset, indicating the start position of one feature in the embedding table
             self.f_offset = np.zeros(self.ln_emb.size, dtype=np.int32)
             self.importance = np.zeros((26, 39291957))
             if self.sketch_flag:
@@ -440,7 +442,7 @@ class DLRM_Net(nn.Module):
                     torch.Tensor(hotn, m_spa),
                     requires_grad=True,
                 )
-                self.register_buffer('sketch_buffer', torch.zeros(hotn * 13, dtype = torch.int32, device = 'cpu'))
+                self.register_buffer('sketch_buffer', torch.zeros(hotn * 13, dtype = torch.int32, device = 'cpu')) # TODO: why 13?
                 init = lib.init
                 init.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_double]
                 init.restype = None
@@ -711,7 +713,7 @@ class DLRM_Net(nn.Module):
         evict_ = np.array(list(ind_2 - ind_1))
         lim = cnt[np.argsort(-cnt)[m]]  # all hot features
         if (len(admit_) > m * 0.05):
-            print(f"evict: {len(admit_)}, m: {m}")
+            print(f"admit: {len(admit_)}, m: {m}")
             self.ada_rebuild()
 
     def insert_adagrad(self, lS_o):
@@ -1173,7 +1175,7 @@ def run():
         args.test_num_workers = args.num_workers
 
     use_gpu = args.use_gpu and torch.cuda.is_available()
-    print(f"availble: {torch.cuda.is_available()}")
+    print(f"cuda availble: {torch.cuda.is_available()}")
 
     if use_gpu:
         torch.cuda.manual_seed_all(args.numpy_rand_seed)
@@ -1186,6 +1188,7 @@ def run():
         print("Using CPU...")
 
     ### prepare training data ###
+    # the bottom mlp architecture
     ln_bot = np.fromstring(args.arch_mlp_bot, dtype=int, sep="-")
     # input data
 
@@ -1195,6 +1198,7 @@ def run():
 #        table_feature_map = {idx: idx for idx in range(len(train_data.counts))}
         nbatches = args.num_batches if args.num_batches > 0 else len(train_ld)
         nbatches_test = len(test_ld)
+        # ln_emb is the number of unique values in each categorical feature
         ln_emb = train_data.counts
         print(ln_emb)
         hash_rate = 0
@@ -1237,7 +1241,7 @@ def run():
     if args.sketch_flag:
         totn = sum(ln_emb)
         hotn = int(totn * args.compress_rate * (1 - args.hash_rate)
-                   * (m_spa * 4 / (m_spa * 4 + 48)))
+                   * (m_spa * 4 / (m_spa * 4 + 48))) # TODO: why this formula?
         hash_rate = args.compress_rate * args.hash_rate
         print(f"hash_rate: {hash_rate}, hotn: {hotn}")
     ln_emb = np.asarray(ln_emb)
@@ -1680,6 +1684,10 @@ def run():
 
                         train_loss = total_loss / total_samp
                         total_loss = 0
+                        try:
+                            smoothed_train_loss = 0.99 * smoothed_train_loss + 0.01 * train_loss
+                        except NameError:
+                            smoothed_train_loss = train_loss
 
                         str_run_type = (
                             "inference" if args.inference_only else "training"
@@ -1694,6 +1702,7 @@ def run():
                                 str_run_type, j + 1, nbatches, k, gT,
                             )
                             + " loss {:.6f}".format(train_loss)
+                            + " smoothed loss {:.6f}".format(smoothed_train_loss)
                             + wall_time,
                             flush=True,
                         )

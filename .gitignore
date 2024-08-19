@@ -141,3 +141,4 @@ cython_debug/
 run_kaggle_pt/
 datasets
 .vscode/
+core.*
