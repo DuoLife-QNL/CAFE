@@ -540,59 +540,6 @@ class DLRM_Net(nn.Module):
 
         return self
 
-    def _apply(self, fn):
-        for module in self.children():
-            module._apply(fn)
-
-        def compute_should_use_set_data(tensor, tensor_applied):
-            if torch._has_compatible_shallow_copy_type(tensor, tensor_applied):
-                # If the new tensor has compatible tensor type as the existing tensor,
-                # the current behavior is to change the tensor in-place using `.data =`,
-                # and the future behavior is to overwrite the existing tensor. However,
-                # changing the current behavior is a BC-breaking change, and we want it
-                # to happen in future releases. So for now we introduce the
-                # `torch.__future__.get_overwrite_module_params_on_conversion()`
-                # global flag to let the user control whether they want the future
-                # behavior of overwriting the existing tensor or not.
-                return not torch.__future__.get_overwrite_module_params_on_conversion()
-            else:
-                return False
-
-        for key, param in self._parameters.items():
-            if param is None:
-                continue
-            # Tensors stored in modules are graph leaves, and we don't want to
-            # track autograd history of `param_applied`, so we have to use
-            # `with torch.no_grad():`
-            with torch.no_grad():
-                param_applied = fn(param)
-            should_use_set_data = compute_should_use_set_data(param, param_applied)
-            if should_use_set_data:
-                param.data = param_applied
-                out_param = param
-            else:
-                assert isinstance(param, Parameter)
-                assert param.is_leaf
-                out_param = Parameter(param_applied, param.requires_grad)
-                self._parameters[key] = out_param
-
-            if param.grad is not None:
-                with torch.no_grad():
-                    grad_applied = fn(param.grad)
-                should_use_set_data = compute_should_use_set_data(param.grad, grad_applied)
-                if should_use_set_data:
-                    assert out_param.grad is not None
-                    out_param.grad.data = grad_applied
-                else:
-                    assert param.grad.is_leaf
-                    out_param.grad = grad_applied.requires_grad_(param.grad.requires_grad)
-
-        for key, buf in self._buffers.items():
-            if buf is not None and key != "sketch_buffer":
-                self._buffers[key] = fn(buf)
-
-        return self
-
     def apply_mlp(self, x, layers):
         # approach 1: use ModuleList
         # for layer in layers:
@@ -882,8 +829,7 @@ def dash_separated_floats(value):
 def inference(
     args,
     dlrm,
-    best_acc_test,
-    best_auc_test,
+    best_metrics,
     test_ld,
     device,
     use_gpu,
@@ -917,7 +863,7 @@ def inference(
         if Z_test.is_cuda:
             torch.cuda.synchronize()
 
-        with record_function("DLRM accuracy compute"):
+        with record_function("DLRM a,ccuracy compute"):
             # compute loss and accuracy
 
             S_test = Z_test.detach().cpu().numpy()  # numpy array
@@ -969,18 +915,24 @@ def inference(
         "test_acc": acc_test,
     }
 
-    is_best = acc_test > best_acc_test
-    if is_best:
-        best_acc_test = acc_test
+    is_best_acc = acc_test > best_metrics[0]
+    is_best_auc = validation_results['roc_auc'] > best_metrics[1]
+    
+    if is_best_acc:
+        best_metrics[0] = acc_test
+    if is_best_auc:
+        best_metrics[1] = validation_results['roc_auc']
+    
     print(
-        " accuracy {:3.3f} %, auc {:3.3f} %, best {:3.3f} %".format(
+        " accuracy {:3.3f} %, best_accuracy {:3.3f} %, auc {:3.3f} %, best_auc {:3.3f} %".format(
             acc_test * 100,
+            best_metrics[0] * 100,
             validation_results['roc_auc'] * 100,
-            best_acc_test * 100
+            best_metrics[1] * 100
         ),
         flush=True,
     )
-    return model_metrics_dict, is_best
+    return model_metrics_dict, is_best_acc, is_best_auc
 
 
 def run():
@@ -1701,7 +1653,7 @@ def run():
                             "Finished {} it {}/{} of epoch {}, {:.2f} ms/it,".format(
                                 str_run_type, j + 1, nbatches, k, gT,
                             )
-                            + " loss {:.6f}".format(train_loss)
+                            + " loss {:.6f},".format(train_loss)
                             + " smoothed loss {:.6f}".format(smoothed_train_loss)
                             + wall_time,
                             flush=True,
@@ -1726,11 +1678,11 @@ def run():
                             "Testing at - {}/{} of epoch {},".format(
                                 j + 1, nbatches, k)
                         )
-                        model_metrics_dict, is_best = inference(
+                        best_metrics = [best_acc_test, best_auc_test]
+                        model_metrics_dict, is_best_acc, is_best_auc = inference(
                             args,
                             dlrm,
-                            best_acc_test,
-                            best_auc_test,
+                            best_metrics,
                             test_ld,
                             device,
                             use_gpu,
@@ -1738,9 +1690,10 @@ def run():
                             args.notinsert_test,
                             args.sketch_flag,
                         )
+                        best_acc_test, best_auc_test = best_metrics
 
                         if (
-                            is_best
+                            (is_best_acc)
                             and not (args.save_model == "")
                             and not args.inference_only
                         ):

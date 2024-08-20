@@ -18,7 +18,6 @@ python dlrm_s_pytorch.py \
     --label-path="datasets/criteo_kaggle/cafe/data_label.npy" \
     --count-path="datasets/criteo_kaggle/cafe/data_count.npy" \
     --nepochs=5 \
-    --hash-flag \
-    --compress-rate=0.2 \
     --test-freq=100000 \
-    | tee logs/hash.log
+    | tee logs/full.log
+
