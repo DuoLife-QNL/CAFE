@@ -1,4 +1,4 @@
-python dlrm_s_pytorch.py \
+python -m debugpy --listen 0.0.0.0:5678 --wait-for-client dlrm_s_pytorch.py \
     --use-gpu \
     --arch-sparse-feature-size=16 \
     --arch-mlp-bot="13-512-256-64-16" \
@@ -17,8 +17,6 @@ python dlrm_s_pytorch.py \
     --dense-path="datasets/criteo_kaggle/cafe/data_int.npy" \
     --label-path="datasets/criteo_kaggle/cafe/data_label.npy" \
     --count-path="datasets/criteo_kaggle/cafe/data_count.npy" \
-    --ada-flag \
-    --compress-rate=0.2 \
-    --nepochs=5 \
-    --test-freq=100000 \    
-    | tee logs/ada.log
+    --nepochs=3 \
+    --double-hash-flag \
+    --compress-rate=0.2

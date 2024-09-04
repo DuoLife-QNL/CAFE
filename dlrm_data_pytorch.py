@@ -652,6 +652,8 @@ def make_criteo_data_and_loaders(args, offset_to_length_converter=False):
         data_count = np.load(args.count_path, mmap_mode='r')
         print('data_cat:')
         print(data_cat)
+        print("data_count:")
+        print(data_count)
         # print(data_cat.shape, data_int.shape, data_T.shape, data_count.shape)
         hot_features = None
         count = np.array(data_count)

@@ -99,6 +99,7 @@ from tricks.md_embedding_bag import md_solver
 from tricks.sk_embedding_bag import get_sketch_time
 from tricks.sk_embedding_bag import reset_sketch_time
 from tricks.adaembed import adaEmbeddingBag
+from tricks.double_hash import DoubleHashEmbeddingBag
 
 
 with warnings.catch_warnings():
@@ -321,6 +322,14 @@ class DLRM_Net(nn.Module):
                 )
                 self.sketch_emb[i] = True
                 N += 1
+            elif self.double_hash_flag and n > 2000 * self.compress_rate:
+                EE = DoubleHashEmbeddingBag(
+                    n,
+                    m,
+                    self.compress_rate,
+                    sparse=True,
+                    mode="sum"
+                )
             else:
                 if self.md_flag:
                     EE = nn.EmbeddingBag(n, max(m), mode="sum", sparse=True)
@@ -380,6 +389,7 @@ class DLRM_Net(nn.Module):
         qr_threshold=200,
         md_flag=False,
         md_threshold=200,
+        double_hash_flag=False, # double hash ratio is also set by @hash_rate
         weighted_pooling=None,
         loss_function="bce",
     ):
@@ -430,6 +440,7 @@ class DLRM_Net(nn.Module):
             self.md_flag = md_flag
             if self.md_flag:
                 self.md_threshold = md_threshold
+            self.double_hash_flag = double_hash_flag
             self.sketch_flag = sketch_flag
             self.hash_rate = hash_rate
             self.hotn = hotn
@@ -1081,6 +1092,8 @@ def run():
     parser.add_argument("--adjust-threshold", type=int, default=1)
     parser.add_argument("--sketch-alpha", type=float, default=1.0)
 
+    parser.add_argument("--double-hash-flag", action="store_true", default=False)
+
     global args
     global nbatches
     global nbatches_test
@@ -1383,6 +1396,7 @@ def run():
         qr_threshold=args.qr_threshold,
         md_flag=args.md_flag,
         md_threshold=args.md_threshold,
+        double_hash_flag=args.double_hash_flag,
         weighted_pooling=args.weighted_pooling,
         loss_function=args.loss_function,
     )
