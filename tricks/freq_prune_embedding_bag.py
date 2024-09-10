@@ -76,7 +76,7 @@ class Sketch:
 """
 
 
-class adaEmbeddingBag(nn.Module):
+class FrequencyPrunedEmbeddingBag(nn.Module):
     r"""Computes sums or means over two 'bags' of embeddings, one using the quotient
     of the indices and the other using the remainder of the indices, without
     instantiating the intermediate embeddings, then performs an operation to combine these.
@@ -175,79 +175,46 @@ class adaEmbeddingBag(nn.Module):
 
     def __init__(
         self,
-        offset,
-        weight,
-        dic,
-        compress_rate,
-        device,
         num_categories,
         embedding_dim,
-        max_norm=None,
-        norm_type=2.0,
-        scale_grad_by_freq=False,
-        sparse=False,
+        hot_cat,
+        device,
     ):
-        super(adaEmbeddingBag, self).__init__()
-        self.offset = offset
-        self.compress_rate = compress_rate
+        super(FrequencyPrunedEmbeddingBag, self).__init__()
         self.num_categories = num_categories
         self.embedding_dim = embedding_dim
+        self.hot_features = hot_cat
         self.device = device
-        # self.hot_num = int((self.num_categories * embedding_dim *
-        #                    compress_rate - self.num_categories * 2) / self.embedding_dim)
-        self.hot_num = int(self.num_categories * self.compress_rate)
-        self.d_time = 0
+        self.hot_num = hot_cat.shape[0]
         self.hot_rate = self.hot_num / self.num_categories
         self.avaible_set = np.arange(1, self.hot_num + 1)
         self.head = 0
         print(f"hot_nums: {self.hot_num}")
-        self.weight = weight
-        self.dic = dic
-
-    def rebuild(self):
-        ind_1 = set(np.argsort(-self.cnt)[:self.hot_num])  # all hot features
-        ind_2 = set(np.where(self.dic != 0)[0])  # old hot features
-        admit_ = np.array(list(ind_1 - ind_2))
-        evict_ = np.array(list(ind_2 - ind_1))
-        # print(f"a: {admit_}")
-        # print(f"e: {evict_}")
-        if len(admit_) != len(evict_):
-            if (len(evict_) != 0):
-                print("error")
-                exit(0)
-            self.dic[admit_] = np.arange(1, self.hot_num + 1)
+        if self.num_categories > 200:
+            self.num_embeddings = self.hot_num + 1
+            self.dic = np.zeros(self.num_categories, dtype=np.int32)  # Initialize dic with zeros
+            # for i in range(self.hot_num):
+            #     self.dic[self.hot_features[i]] = i + 1  # Map hot features to their indices in weight
+            # All non-hot categories point to self.weight[0]
+            self.dic[self.hot_features] = np.arange(1, self.hot_num + 1)
         else:
-            self.dic[admit_] = self.dic[evict_]
-            with torch.no_grad():
-                self.weight[self.dic[admit_]] = 0
-            self.dic[evict_] = 0
+            self.num_embeddings = self.num_categories
+        self.weight = Parameter(torch.Tensor(self.num_embeddings, self.embedding_dim))
+        self.reset_parameters()
+        
 
-    def check(self):
-        N = min(self.num_categories, 60000)
-        sample = random.sample(range(0, self.num_categories), N)
-        dic = self.dic[sample]
-        cnt = self.cnt[sample]
-        m = math.ceil(N * self.hot_rate)
-
-        ind_1 = set(np.argsort(-cnt)[:m])  # all hot features
-        ind_2 = set(np.where(dic != 0)[0])  # old hot features
-        admit_ = np.array(list(ind_1 - ind_2))
-        evict_ = np.array(list(ind_2 - ind_1))
-        lim = cnt[np.argsort(-cnt)[m]]  # all hot features
-        if (len(admit_) + len(evict_) > m * 0.05):
-            print(f"n: {N}, m: {m}, lim: {lim}")
-            self.rebuild()
-
-    def decay(self):
-        self.cnt *= 0.8
+    def reset_parameters(self):
+        nn.init.constant_(self.weight, 0)  # Set all embeddings to 0
+        # nn.init.uniform_(self.weight, -np.)
 
     def forward(self, input, offsets=None, per_sample_weights=None, test=False):
-        # self.weight[0] is the zero embedding, which is used as the embedding for pruned features
         with torch.no_grad():
             self.weight[0] = 0
         # #start_time = time.time()
-        input = input + self.offset
-        dic = self.dic[input.cpu()]
+        if self.num_categories > 200:
+            dic = self.dic[input.cpu()]
+        else:
+            dic = input.cpu()
         dic = torch.tensor(dic).to(self.device)
         embed = F.embedding_bag(
             dic,
@@ -257,17 +224,6 @@ class adaEmbeddingBag(nn.Module):
         )
 
         return embed
-
-    def insert_grad(self, input):
-        dic = self.dic[input.cpu()]
-        dic = torch.tensor(dic).to(self.device)
-        grad_norm = torch.norm(self.weight.grad[dic], dim=1, p=2)
-        self.cnt[input] += np.array(grad_norm.cpu())
-        self.d_time += 1
-        if (self.d_time % 1024 == 0):
-            self.check()
-        if (self.d_time % 1024 == 0):
-            self.decay()
 
     def extra_repr(self):
         s = "{num_embeddings}, {embedding_dim}"

@@ -17,8 +17,6 @@ python dlrm_s_pytorch.py \
     --dense-path="datasets/criteo_kaggle/cafe/data_int.npy" \
     --label-path="datasets/criteo_kaggle/cafe/data_label.npy" \
     --count-path="datasets/criteo_kaggle/cafe/data_count.npy" \
-    --ada-flag \
-    --compress-rate=0.2 \
     --nepochs=5 \
-    --test-freq=100000 \
-    | tee logs/ada.log
+    --freq-prune-flag \
+    --compress-rate=0.2

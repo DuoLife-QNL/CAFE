@@ -100,6 +100,7 @@ from tricks.sk_embedding_bag import get_sketch_time
 from tricks.sk_embedding_bag import reset_sketch_time
 from tricks.adaembed import adaEmbeddingBag
 from tricks.double_hash import DoubleHashEmbeddingBag
+from tricks.freq_prune_embedding_bag import FrequencyPrunedEmbeddingBag
 
 
 with warnings.catch_warnings():
@@ -330,6 +331,13 @@ class DLRM_Net(nn.Module):
                     sparse=True,
                     mode="sum"
                 )
+            elif self.frequency_pruning_flag:
+                EE = FrequencyPrunedEmbeddingBag(
+                    n,
+                    m,
+                    self.hot_cats[i],
+                    self.device,
+                )
             else:
                 if self.md_flag:
                     EE = nn.EmbeddingBag(n, max(m), mode="sum", sparse=True)
@@ -389,9 +397,11 @@ class DLRM_Net(nn.Module):
         qr_threshold=200,
         md_flag=False,
         md_threshold=200,
-        double_hash_flag=False, # double hash ratio is also set by @hash_rate
+        double_hash_flag=False,
+        frequency_pruning_flag=False,
         weighted_pooling=None,
         loss_function="bce",
+        hot_cats=None,
     ):
         super(DLRM_Net, self).__init__()
 
@@ -441,6 +451,8 @@ class DLRM_Net(nn.Module):
             if self.md_flag:
                 self.md_threshold = md_threshold
             self.double_hash_flag = double_hash_flag
+            self.frequency_pruning_flag = frequency_pruning_flag
+            self.hot_cats = hot_cats
             self.sketch_flag = sketch_flag
             self.hash_rate = hash_rate
             self.hotn = hotn
@@ -1092,7 +1104,11 @@ def run():
     parser.add_argument("--adjust-threshold", type=int, default=1)
     parser.add_argument("--sketch-alpha", type=float, default=1.0)
 
+    # double hash
     parser.add_argument("--double-hash-flag", action="store_true", default=False)
+
+    # frequency-based pruning
+    parser.add_argument("--freq-prune-flag", action="store_true", default=False)
 
     global args
     global nbatches
@@ -1161,6 +1177,7 @@ def run():
         train_data, train_ld, test_data, test_ld = dp.make_criteo_data_and_loaders(
             args)
 #        table_feature_map = {idx: idx for idx in range(len(train_data.counts))}
+        hot_cats = train_data.hot_cats
         nbatches = args.num_batches if args.num_batches > 0 else len(train_ld)
         nbatches_test = len(test_ld)
         # ln_emb is the number of unique values in each categorical feature
@@ -1397,8 +1414,10 @@ def run():
         md_flag=args.md_flag,
         md_threshold=args.md_threshold,
         double_hash_flag=args.double_hash_flag,
+        frequency_pruning_flag=args.freq_prune_flag,
         weighted_pooling=args.weighted_pooling,
         loss_function=args.loss_function,
+        hot_cats=hot_cats,
     )
 
     # test prints

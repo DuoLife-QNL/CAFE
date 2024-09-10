@@ -325,11 +325,13 @@ class KaggleDataset:
         compress_rate,
         hot_features=None,
         hash_rate=0.5,
+        hot_cats=None,
     ):
         self.hash_rate = hash_rate
         self.hash_flag = hash_flag
         self.hc_flag = hc_flag
         self.compress_rate = compress_rate
+        self.hot_cats = hot_cats
         if (split == 'train'):
             # special designed dataset
             # arr = np.arange(45840617)
@@ -343,6 +345,7 @@ class KaggleDataset:
             self.data_cat = data_cat[:train_len]
             self.data_int = data_int[:train_len]
             self.data_T = data_T[:train_len]
+            # self.feature_frequencies = self.calculate_feature_frequencies(data_cat[:train_len])
         if (split == 'test'):
             train_len = 45840617 * 6 // 7
             self.data_cat = data_cat[train_len:]
@@ -365,6 +368,13 @@ class KaggleDataset:
                     self.counts[i] = int(
                         self.hash_size[i] + len(self.hot_features[i]))
         print(f"count: {self.counts}, hash_size: {self.hash_size}")
+
+    # def calculate_feature_frequencies(self, data):
+    #     feature_frequencies = []
+    #     for feature_idx in range(26):
+    #         counter = Counter(data[:, feature_idx])
+    #         feature_frequencies.append(counter)
+    #     return feature_frequencies
 
     def __getitem__(self, index):
         if isinstance(index, slice):
@@ -468,27 +478,39 @@ def collate_wrapper_criteo_length(list_of_tuples):
 
     return X_int, lS_l, lS_i, T
 
-
-def calc_bucket_hot(data, threshold, compress_rate, hash_rate, count):
+def calc_bucket_hot(data, compress_rate, hash_rate, count):
+    """
+    Put all features (with num_cat > 200) together into consideration. For feature with num_cat <= 200, we do not use pruning.
+    ===========
+    Return:
+        hot_dict: a dictionary of hot categories for each feature.
+    """
     print(data.shape)
     hot_dict = []
     tot = 0
     unique_values = []
+    # counts represents the appearance of each category of each feature. Here different features are considered together.
     counts = []
     for i in range(26):
         hot_dict.append({})
         if count[i] > 200:
             uni, cnt = np.unique(data[:, i], return_counts=True)
             uni += tot
+            # the unique values of each feature is accumulated onto the unique_values
             unique_values.extend(uni.tolist())
             counts.extend(cnt.tolist())
             tot += count[i]
 
-    hot_nums = int(tot * compress_rate * (1.0 - hash_rate))
+    # Below is the cafe original code
+    # hot_nums = int(tot * compress_rate * (1.0 - hash_rate))
+    hot_nums = int(tot * compress_rate) 
     print(f"hot_nums: {hot_nums}")
     idx = np.argsort(np.array(counts))[-hot_nums:]
+    # after index select, the unique_values is the hot features found
     unique_values = np.array(unique_values)[idx]
+    # This sort actually makes the unique_values sorted by the feature. This is because the unique_values is the accumulated value.
     unique_values.sort()
+
     lst = 0
     for i in range(26):
         if count[i] > 200:
@@ -664,9 +686,15 @@ def make_criteo_data_and_loaders(args, offset_to_length_converter=False):
         # for i in range(26):
         #     new_count[i] = count[i+1] - count[i]
 
-        # train_len = 45840617 * 6 // 7
+        train_len = 45840617 * 6 // 7
         # if args.bucket_flag:
         #     hot_features = calc_bucket_hot(data_cat[:train_len], args.compress_rate, args.hash_rate, data_count)
+        # hot_features = calc_bucket_hot(data_cat[:train_len], args.compress_rate, args.hash_rate, data_count)
+
+        # This is used for frequency pruning
+        hot_dic = calc_bucket_hot(data_cat[:train_len], args.compress_rate, args.hash_rate, data_count)
+        #  The hot categories for each feature
+        hot_cats = [np.array(list(dic.keys()), dtype=int) for dic in hot_dic]
         train_data = KaggleDataset(
             new_count,
             data_cat,
@@ -678,6 +706,7 @@ def make_criteo_data_and_loaders(args, offset_to_length_converter=False):
             args.compress_rate,
             hot_features,
             args.hash_rate,
+            hot_cats,
         )
         test_data = KaggleDataset(
             new_count,

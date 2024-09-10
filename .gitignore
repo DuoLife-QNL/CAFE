@@ -142,3 +142,5 @@ run_kaggle_pt/
 datasets
 .vscode/
 core.*
+visualization/**/*.csv
+visualization/**/*.pdf

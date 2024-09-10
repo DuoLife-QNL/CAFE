@@ -15,15 +15,21 @@ def extract_best_auc(file_path):
 
 def process_folder(folder_path, output_csv):
     results = []
-    for filename in os.listdir(folder_path):
-        if filename.endswith('.log'):
-            file_path = os.path.join(folder_path, filename)
-            best_auc = extract_best_auc(file_path)
-            results.append([folder_path, filename, best_auc])
+    for root, dirs, files in os.walk(folder_path):  # Recursively walk through the folder
+        for filename in files:
+            if filename.endswith('.log'):
+                file_path = os.path.join(root, filename)  # Use root to get the correct file path
+                best_auc = extract_best_auc(file_path)
+                
+                # Extract method and compression rate from the filename
+                method, compression_rate = filename.rsplit('_', 1)  # Get everything before the last underscore as method
+                compression_rate = compression_rate.replace('.log', '')  # Remove the .log extension
+                
+                results.append([root, filename, best_auc, method, compression_rate])  # Include method and compression rate
     
     with open(output_csv, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(['Folder Path', 'Log File', 'Best AUC'])
+        writer.writerow(['Folder Path', 'Log File', 'Best AUC', 'Method', 'Compression Rate'])  # Added new headers
         writer.writerows(results)
 
 def main():

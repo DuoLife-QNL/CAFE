@@ -19,11 +19,14 @@ other_data = data[data['Method'] != 'full']
 plt.figure(figsize=(10, 6))
 
 # Plot the baseline 'full' method
-plt.axhline(y=full_data['Best AUC'].values[0], color='r', linestyle='--', label='full (baseline)')
+if not full_data.empty:  # Check if full_data is not empty
+    plt.axhline(y=full_data['Best AUC'].values[0], color='r', linestyle='--', label='full (baseline)')
+else:
+    print("Warning: full_data is empty. Cannot plot Best AUC.")
 
-# Plot other methods
+# Sort the other_data by 'Compression Rate' for each method before plotting
 for method in other_data['Method'].unique():
-    method_data = other_data[other_data['Method'] == method]
+    method_data = other_data[other_data['Method'] == method].sort_values('Compression Rate')
     plt.plot(method_data['Compression Rate'], method_data['Best AUC'], marker='o', label=method)
 
 # Set plot labels and title
