@@ -190,6 +190,7 @@ class FrequencyPrunedEmbeddingBag(nn.Module):
         self.avaible_set = np.arange(1, self.hot_num + 1)
         self.head = 0
         print(f"hot_nums: {self.hot_num}")
+        self.num_embeddings = self.num_categories
         if self.num_categories > 200:
             self.num_embeddings = self.hot_num + 1
             self.dic = np.zeros(self.num_categories, dtype=np.int32)  # Initialize dic with zeros
@@ -197,20 +198,16 @@ class FrequencyPrunedEmbeddingBag(nn.Module):
             #     self.dic[self.hot_features[i]] = i + 1  # Map hot features to their indices in weight
             # All non-hot categories point to self.weight[0]
             self.dic[self.hot_features] = np.arange(1, self.hot_num + 1)
-        else:
-            self.num_embeddings = self.num_categories
         self.weight = Parameter(torch.Tensor(self.num_embeddings, self.embedding_dim))
         self.reset_parameters()
         
-
     def reset_parameters(self):
-        nn.init.constant_(self.weight, 0)  # Set all embeddings to 0
-        # nn.init.uniform_(self.weight, -np.)
+        # nn.init.constant_(self.weight, 0)  # Set all embeddings to 0
+        nn.init.uniform_(self.weight, -np.sqrt(1 / self.num_embeddings), np.sqrt(1 / self.num_embeddings))
 
     def forward(self, input, offsets=None, per_sample_weights=None, test=False):
         with torch.no_grad():
             self.weight[0] = 0
-        # #start_time = time.time()
         if self.num_categories > 200:
             dic = self.dic[input.cpu()]
         else:

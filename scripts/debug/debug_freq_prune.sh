@@ -19,4 +19,4 @@ python -m debugpy --listen 0.0.0.0:5678 --wait-for-client dlrm_s_pytorch.py \
     --count-path="datasets/criteo_kaggle/cafe/data_count.npy" \
     --nepochs=3 \
     --freq-prune-flag \
-    --compress-rate=0.2
+    --compress-rate=0.9

@@ -10,9 +10,10 @@ mkdir -p "$log_dir"
 # 定义压缩率数组
 compress_rates=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9)
 
-# 执行freq prune方法
+
+# 执行ada方法
 for rate in "${compress_rates[@]}"; do
-    log_file="$log_dir/freq_prune_${rate}.log"
+    log_file="$log_dir/uniinit_ada_${rate}.log"
     python dlrm_s_pytorch.py \
         --use-gpu \
         --arch-sparse-feature-size=16 \
@@ -32,9 +33,9 @@ for rate in "${compress_rates[@]}"; do
         --dense-path="datasets/criteo_kaggle/cafe/data_int.npy" \
         --label-path="datasets/criteo_kaggle/cafe/data_label.npy" \
         --count-path="datasets/criteo_kaggle/cafe/data_count.npy" \
-        --nepochs=3 \
-        --freq-prune-flag \
+        --ada-flag \
         --compress-rate=$rate \
+        --nepochs=5 \
         --test-freq=100000 \
         | tee "$log_file"
 done

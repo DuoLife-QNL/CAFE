@@ -503,8 +503,13 @@ def calc_bucket_hot(data, compress_rate, hash_rate, count):
 
     # Below is the cafe original code
     # hot_nums = int(tot * compress_rate * (1.0 - hash_rate))
-    hot_nums = int(tot * compress_rate) 
+    hot_nums = int(tot * compress_rate)
+    num_unique_values = len(unique_values)
+    if num_unique_values < hot_nums:
+        print(f"Warning: num_unique_values {num_unique_values} < hot_nums {hot_nums}, setting hot_nums to num_unique_values")
+        hot_nums = num_unique_values
     print(f"hot_nums: {hot_nums}")
+
     idx = np.argsort(np.array(counts))[-hot_nums:]
     # after index select, the unique_values is the hot features found
     unique_values = np.array(unique_values)[idx]

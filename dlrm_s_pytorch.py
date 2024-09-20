@@ -265,8 +265,10 @@ class DLRM_Net(nn.Module):
             self.dic = np.zeros(N, dtype=np.int32)
             # self.hotn = int((N * m * self.compress_rate - N * 2) / m)
             self.hotn = int(N * self.compress_rate)
+            W = torch.Tensor(self.hotn + 1, m)
+            nn.init.uniform_(W, -np.sqrt(1 / (self.hotn)), np.sqrt(1 / (self.hotn)))
             self.weight = Parameter(
-                torch.Tensor(self.hotn + 1, m),
+                W,
                 requires_grad=True,
             )
             self.hot_rate = self.hotn / N
@@ -667,7 +669,14 @@ class DLRM_Net(nn.Module):
         else:
             self.dic[admit_] = self.dic[evict_]
             with torch.no_grad():
-                self.weight[self.dic[admit_]] = 0
+                # self.weight[self.dic[admit_]] = 0
+                self.weight[self.dic[admit_]] = torch.Tensor(
+                    np.random.uniform(
+                        -np.sqrt(1 / (self.weight.size()[0] - 1)), 
+                        np.sqrt(1 / (self.weight.size()[0] - 1)), 
+                        size=(len(admit_), self.weight.size()[1])
+                    )
+                ).to(self.device)
             self.dic[evict_] = 0
 
     def ada_check(self):

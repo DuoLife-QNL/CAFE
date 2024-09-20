@@ -219,7 +219,14 @@ class adaEmbeddingBag(nn.Module):
         else:
             self.dic[admit_] = self.dic[evict_]
             with torch.no_grad():
-                self.weight[self.dic[admit_]] = 0
+                # self.weight[self.dic[admit_]] = 0
+                self.weight[self.dic[admit_]] = torch.Tensor(
+                    np.random.uniform(
+                        -np.sqrt(1 / (self.hot_num)), 
+                        np.sqrt(1 / (self.hot_num)), 
+                        size=(len(admit_), self.embedding_dim)
+                    )
+                ).to(self.device)
             self.dic[evict_] = 0
 
     def check(self):

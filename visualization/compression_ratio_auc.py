@@ -6,6 +6,7 @@ import argparse
 # Parse input arguments
 parser = argparse.ArgumentParser(description='Visualize compression ratio vs AUC.')
 parser.add_argument('csv_file', type=str, help='Path to the CSV file containing the data.')
+parser.add_argument('--output_file', type=str, default='compression_ratio_auc.pdf', help='Name of the output PDF file.')
 args = parser.parse_args()
 
 # Load the data from the specified CSV file
@@ -46,8 +47,5 @@ if not os.path.exists(figures_dir):
     os.makedirs(figures_dir)
 
 # Save the plot as a PDF file
-plt.savefig(os.path.join(figures_dir, 'compression_ratio_auc.pdf'))
+plt.savefig(os.path.join(figures_dir, args.output_file))
 plt.show()
-
-
-

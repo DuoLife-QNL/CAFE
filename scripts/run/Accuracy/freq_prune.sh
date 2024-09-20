@@ -19,6 +19,6 @@ python dlrm_s_pytorch.py \
     --count-path="datasets/criteo_kaggle/cafe/data_count.npy" \
     --nepochs=5 \
     --freq-prune-flag \
-    --compress-rate=0.2 \
+    --compress-rate=0.9 \
     --test-freq=100000 \
     | tee logs/freq_prune.log
