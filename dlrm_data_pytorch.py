@@ -4,6 +4,7 @@ import bisect
 import collections
 import sys
 from collections import deque
+from typing import Any, Dict, List, Tuple
 
 # numpy
 import numpy as np
@@ -15,6 +16,310 @@ import torch
 from numpy import random as ra
 from torch.utils.data import Dataset
 
+from data_handler.load_dataset import load_processed_dataset
+
+class MomentsDataset:
+    metadata: Dict[str, Any]
+    dense_keys: List[str]
+    sparse_keys: List[str]
+    num_feat_per_field: torch.Tensor
+    hash_size: torch.Tensor
+    hash_flag: bool
+    hash_rate: float
+    compress_rate: float
+
+    def __init__(
+        self,
+        samples: List[Dict[str, Dict[str, List[int]]]],
+        labels: torch.Tensor,
+        metadata: Dict[str, Any],
+        keys_info: Dict[str, Dict[str, List[str]]],
+        dataset_type: str = 'train' or 'test',
+        hash_flag: bool = False,
+        hash_rate: float = 0.5,
+        compress_rate: float = 1.0,
+    ):
+        self.hash_rate = hash_rate
+        self.hash_flag = hash_flag
+        self.compress_rate = compress_rate
+        self.metadata = metadata
+        self.dense_keys: List[str] = keys_info['dense_keys']
+        # self.sparse_keys: List[str] = keys_info['sparse_keys']
+        self.sparse_keys: List[str] = list(self.metadata['feature_counts_per_field'].keys())
+
+        # Get dimensions of dense features from first sample
+        first_sample_dense = samples[0]['dense_dict']
+        dense_dims = [first_sample_dense[key].size(0) for key in self.dense_keys]
+        dense_dims = torch.tensor(dense_dims, dtype=torch.int32)
+        self.dense_dim = torch.sum(dense_dims)
+        print(f"Dense feature dimensions: {self.dense_dim}")
+        
+        # Split data into train/test
+        num_total_samples = self.metadata['num_samples']
+        num_train_samples = int(num_total_samples * 0.8)  # 80% for training
+        
+        if dataset_type == 'train':
+            self.samples = samples[:num_train_samples]
+            self.labels = labels[:num_train_samples]
+        elif dataset_type == 'test':
+            self.samples = samples[num_train_samples:]
+            self.labels = labels[num_train_samples:]
+        else:
+            raise ValueError(f"Invalid dataset type: {dataset_type}")
+            
+        # Process feature maps to get counts for each field
+        num_feat_per_field: List[int] = []
+        field_num_features: Dict[str, int] = self.metadata['feature_counts_per_field']
+        for field in self.sparse_keys:
+            field_size = field_num_features[field]
+            num_feat_per_field.append(field_size)
+        self.num_feat_per_field = torch.tensor(num_feat_per_field, dtype=torch.int32)
+
+        # if self.hash_flag:
+        #     # Initialize hash sizes
+        #     self.hash_size = torch.zeros(len(num_feat_per_field), dtype=torch.int32)
+        #     for i in range(len(self.num_feat_per_field)):
+        #         if self.num_feat_per_field[i] > 2000 * self.compress_rate:
+        #             self.num_feat_per_field[i] = int(math.ceil(self.num_feat_per_field[i] * self.compress_rate))
+        #         self.hash_size[i] = self.num_feat_per_field[i]
+
+        # print(f"count: {self.num_feat_per_field}, hash_size: {self.hash_size}")
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [
+                self[idx] 
+                for idx in range(index.start or 0, index.stop or len(self), index.step or 1)
+            ]
+            
+        sample = self.samples[index]
+        
+        # Process dense features and concatenate them into a 1D tensor
+        dense_features = torch.cat([
+            sample['dense_dict'][key]
+            for key in self.dense_keys
+        ])
+        assert dense_features.size(0) == self.dense_dim and len(dense_features.size()) == 1
+        
+        # Process sparse features
+        sparse_features = []
+        offsets = []
+        current_offset = 0
+        
+        for field in self.sparse_keys:
+            field_values = sample['sparse_dict'].get(field, [])
+                
+            # # Apply hashing if needed
+            # if self.hash_flag or self.hc_flag:
+            #     field_idx = self.sparse_keys.index(field)
+            #     if self.hash_flag and self.hash_size[field_idx] != 0:
+            #         field_values = [v % self.hash_size[field_idx] for v in field_values]
+            #     elif self.hc_flag and self.hash_size[field_idx] != 0:
+            #         field_values = [
+            #             self.hot_features[field_idx][v] if v in self.hot_features[field_idx]
+            #             else len(self.hot_features[field_idx]) + (v % self.hash_size[field_idx])
+            #             for v in field_values
+            #         ]
+            
+            sparse_features.extend(field_values)
+            offsets.append(current_offset)
+            current_offset += len(field_values)
+        offsets.append(current_offset)
+        offsets = torch.tensor(offsets, dtype=torch.int32)
+        sparse_features = torch.tensor(sparse_features, dtype=torch.int32)
+            
+        return (dense_features, offsets, sparse_features, self.labels[index])
+
+    def __len__(self):
+        return len(self.samples)
+    
+
+def parse_batch_offset_field(batch_offsets: List[torch.Tensor], batch_sparse_features: List[torch.Tensor]):
+    """
+    Parse batched sparse features with variable lengths into a single tensor with corresponding offsets.
+    
+    Args:
+        batch_offsets: List of tensors containing offsets for each sample in the batch.
+                      Each tensor has shape (num_fields + 1) indicating start/end indices.
+        batch_sparse_features: List of tensors containing sparse feature values for each sample.
+                             Each tensor has variable length.
+    
+    Returns:
+        batch_sparse_feature: Single tensor containing all sparse features concatenated.
+        batch_sample_offsets: Tensor of offsets indicating start indices for each field of each sample.
+    
+    Example:
+        batch_offsets = [
+            tensor([0, 2, 3]),  # Sample 1: field1=[0:2], field2=[2:3]
+            tensor([0, 1, 4])   # Sample 2: field1=[0:1], field2=[1:4]
+        ]
+        batch_sparse_features = [
+            tensor([1, 2, 3]),  # Sample 1: [1,2], [3]
+            tensor([4, 5, 6, 7]) # Sample 2: [4], [5,6,7]
+        ]
+        
+        Returns:
+            batch_sparse_feature = tensor([1, 2, 4, 3, 5, 6, 7])
+            batch_sample_offsets = tensor([0, 2, 3, 4, 7])
+    """
+    batch_size = len(batch_offsets)
+    num_sparse_fields = batch_offsets[0].size(0) - 1
+    batch_sparse_feature = torch.zeros(sum(len(feature) for feature in batch_sparse_features), dtype=torch.int32)
+    batch_sample_offsets = torch.zeros(batch_size * num_sparse_fields + 1, dtype=torch.int32)
+
+    pos = 0
+    offset_index = 0
+
+    for field_idx in range(num_sparse_fields):
+        for batch_idx in range(batch_size):
+            sample_start_idx = batch_offsets[batch_idx][field_idx]
+            sample_end_idx = batch_offsets[batch_idx][field_idx + 1]
+            length = sample_end_idx - sample_start_idx
+            sample_sparse_field = batch_sparse_features[batch_idx][sample_start_idx:sample_end_idx]
+            batch_sparse_feature[pos:pos+length] = sample_sparse_field
+            batch_sample_offsets[offset_index] = pos
+            offset_index += 1
+            pos += length
+
+    batch_sample_offsets[offset_index] = pos
+
+    return batch_sparse_feature, batch_sample_offsets
+
+def test_parse_batch_offset_field():
+    # Test case 1 from example in docstring
+    batch_offsets = [
+        torch.tensor([0, 2, 3]),  # Sample 1: field1=[0:2], field2=[2:3]
+        torch.tensor([0, 1, 4])   # Sample 2: field1=[0:1], field2=[1:4]
+    ]
+    batch_sparse_features = [
+        torch.tensor([1, 2, 3]),      # Sample 1: [1,2], [3]
+        torch.tensor([4, 5, 6, 7])    # Sample 2: [4], [5,6,7]
+    ]
+    
+    expected_sparse_feature = torch.tensor([1, 2, 4, 3, 5, 6, 7])
+    expected_sample_offsets = torch.tensor([0, 2, 3, 4, 7])
+    
+    # Run the function
+    sparse_feature, sample_offsets = parse_batch_offset_field(batch_offsets, batch_sparse_features)
+    
+    # Check results
+    assert torch.equal(sparse_feature, expected_sparse_feature), \
+        f"Expected sparse feature {expected_sparse_feature}, but got {sparse_feature}"
+    assert torch.equal(sample_offsets, expected_sample_offsets), \
+        f"Expected sample offsets {expected_sample_offsets}, but got {sample_offsets}"
+
+    # Test case 2: Empty fields
+    batch_offsets = [
+        torch.tensor([0, 0, 2]),  # Sample 1: field1=[], field2=[0:2]
+        torch.tensor([0, 1, 1])   # Sample 2: field1=[0:1], field2=[]
+    ]
+    batch_sparse_features = [
+        torch.tensor([1, 2]),     # Sample 1: [], [1,2]
+        torch.tensor([3])         # Sample 2: [3], []
+    ]
+    
+    expected_sparse_feature = torch.tensor([3, 1, 2])
+    expected_sample_offsets = torch.tensor([0, 0, 1, 3, 3])
+    
+    sparse_feature, sample_offsets = parse_batch_offset_field(batch_offsets, batch_sparse_features)
+    
+    assert torch.equal(sparse_feature, expected_sparse_feature), \
+        f"Expected sparse feature {expected_sparse_feature}, but got {sparse_feature}"
+    assert torch.equal(sample_offsets, expected_sample_offsets), \
+        f"Expected sample offsets {expected_sample_offsets}, but got {sample_offsets}"
+
+    # Test case 3: Single field
+    batch_offsets = [
+        torch.tensor([0, 3]),     # Sample 1: field1=[0:3]
+        torch.tensor([0, 2])      # Sample 2: field1=[0:2]
+    ]
+    batch_sparse_features = [
+        torch.tensor([1, 2, 3]),  # Sample 1: [1,2,3]
+        torch.tensor([4, 5])      # Sample 2: [4,5]
+    ]
+    
+    expected_sparse_feature = torch.tensor([1, 2, 3, 4, 5])
+    expected_sample_offsets = torch.tensor([0, 3, 5])
+    
+    sparse_feature, sample_offsets = parse_batch_offset_field(batch_offsets, batch_sparse_features)
+    
+    assert torch.equal(sparse_feature, expected_sparse_feature), \
+        f"Expected sparse feature {expected_sparse_feature}, but got {sparse_feature}"
+    assert torch.equal(sample_offsets, expected_sample_offsets), \
+        f"Expected sample offsets {expected_sample_offsets}, but got {sample_offsets}"
+        
+    print("All test cases passed!")
+
+if __name__ == "__main__":
+    test_parse_batch_offset_field()
+
+def collate_wrapper_moments(list_of_tuples: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]):
+    """
+    Collate function for the Moment dataset that handles variable-length sparse features
+    """
+    batch_dense_features, list_batch_offsets, list_batch_sparse_features, batch_labels = zip(*list_of_tuples)
+    batch_dense_features = torch.stack(batch_dense_features)
+    batch_labels = torch.stack(batch_labels)
+
+    batch_sparse_feature, batch_sample_offsets = parse_batch_offset_field(list_batch_offsets, list_batch_sparse_features)
+    return batch_dense_features, batch_sample_offsets, batch_sparse_feature, batch_labels
+
+def make_moments_data_and_loaders(args):
+    """
+    Create data loaders for the Moment dataset
+    """
+    # Load the dataset
+    samples, labels, metadata, keys_info = load_processed_dataset(
+        samples_path=args.samples_path,
+        labels_path=args.labels_path,
+        metadata_path=args.metadata_path
+    )
+
+    keys_info['sparse_keys'] = keys_info['single_sparse_keys'] + keys_info['multi_sparse_keys']
+    
+    # Create train and test datasets
+    train_data = MomentsDataset(
+        samples=samples,
+        labels=labels,
+        metadata=metadata,
+        keys_info=keys_info,
+        dataset_type='train',
+        hash_flag=args.hash_flag,
+        compress_rate=args.compress_rate,
+        hash_rate=args.hash_rate,
+    )
+    
+    test_data = MomentsDataset(
+        samples=samples,
+        labels=labels,
+        metadata=metadata,
+        keys_info=keys_info,
+        dataset_type='test',
+        hash_flag=args.hash_flag,
+        compress_rate=args.compress_rate,
+        hash_rate=args.hash_rate,
+    )
+    
+    # Create data loaders
+    train_loader = torch.utils.data.DataLoader(
+        train_data,
+        batch_size=args.mini_batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        collate_fn=collate_wrapper_moments,
+        pin_memory=True,
+    )
+    
+    test_loader = torch.utils.data.DataLoader(
+        test_data,
+        batch_size=args.test_mini_batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=collate_wrapper_moments,
+        pin_memory=True,
+    )
+    
+    return train_data, train_loader, test_loader
 
 class KDD12Dataset:
     def __init__(
@@ -426,7 +731,7 @@ def collate_wrapper_criteo_offset2(list_of_tuples):
     featureCnt = X_cat.shape[1]
 
     lS_i = [X_cat[:, i] for i in range(featureCnt)]
-    lS_o = [torch.tensor(range(batchSize)) for _ in range(featureCnt)]
+    lS_o = [torch.tensor(range(batchSize + 1)) for _ in range(featureCnt)]
 
     return X_int, torch.stack(lS_o), torch.stack(lS_i), T
 

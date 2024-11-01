@@ -261,6 +261,7 @@ class adaEmbeddingBag(nn.Module):
             self.weight,
             offsets,
             sparse=True,
+            include_last_offset=True,
         )
 
         return embed

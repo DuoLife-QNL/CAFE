@@ -81,6 +81,7 @@ import sklearn.metrics
 # pytorch
 import torch
 import torch.nn as nn
+from torch import Tensor
 from torch._ops import ops
 from torch.autograd.profiler import record_function
 from torch.nn.parallel.parallel_apply import parallel_apply
@@ -150,6 +151,9 @@ def dlrm_wrap(X, lS_o, lS_i, use_gpu, device, ndevices=1, test=False, sk_flag=Fa
         else:
             return dlrm(None, lS_o, lS_i, test)
 
+def dlrm_wrap_moments(batch_dense_features, batch_sample_offsets, batch_sparse_feature, use_gpu, device, ndevices=1, test=False, sk_flag=False, **kwargs):
+    with record_function("DLRM forward"):
+        return dlrm(batch_dense_features.to(device), batch_sample_offsets.to(device), batch_sparse_feature.to(device), test, **kwargs)
 
 def loss_fn_wrap(Z, T, use_gpu, device):
     with record_function("DLRM loss compute"):
@@ -253,6 +257,8 @@ class DLRM_Net(nn.Module):
         return torch.nn.Sequential(*layers)
 
     def create_emb(self, m, ln, weighted_pooling=None):
+        # m: 稀疏特征维度
+        # ln: 一个np.array，每个元素表示sparse field总共有多少特征
         emb_l = nn.ModuleList()
         print(ln)
         v_W_l = []
@@ -344,7 +350,7 @@ class DLRM_Net(nn.Module):
                 if self.md_flag:
                     EE = nn.EmbeddingBag(n, max(m), mode="sum", sparse=True)
                 else:
-                    EE = nn.EmbeddingBag(n, m, mode="sum", sparse=True)
+                    EE = nn.EmbeddingBag(n, m, mode="sum", sparse=True, include_last_offset=True)
                 # initialize embeddings
                 # nn.init.uniform_(EE.weight, a=-np.sqrt(1 / n), b=np.sqrt(1 / n))
                 tmp_n = max(n, 5)
@@ -575,7 +581,7 @@ class DLRM_Net(nn.Module):
             return None
         return layers(x)
 
-    def apply_emb(self, lS_o, lS_i, emb_l, v_W_l, test):
+    def apply_emb(self, lS_o, lS_i, emb_l, v_W_l, test, *args, **kwargs):
         # WARNING: notice that we are processing the batch at once. We implicitly
         # assume that the data is laid out such that:
         # 1. each embedding is indexed with a group of sparse indices,
@@ -800,10 +806,10 @@ class DLRM_Net(nn.Module):
 
         return R
     
-    def forward(self, dense_x, lS_o, lS_i, test):
-        return self.sequential_forward(dense_x, lS_o, lS_i, test)
+    def forward(self, dense_x, lS_o, lS_i, test, *args, **kwargs):
+        return self.sequential_forward(dense_x, lS_o, lS_i, test, *args, **kwargs)
 
-    def sequential_forward(self, dense_x, lS_o, lS_i, test):
+    def sequential_forward(self, dense_x, lS_o, lS_i, test, *args, **kwargs):
         # process dense features (using bottom mlp), resulting in a row vector
         x = self.apply_mlp(dense_x, self.bot_l)
         # debug prints
@@ -811,7 +817,7 @@ class DLRM_Net(nn.Module):
         # print(x.detach().cpu().numpy())
 
         # process sparse features(using embeddings), resulting in a list of row vectors
-        ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l, test)
+        ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l, test, *args, **kwargs)
         # for y in ly:
         #     print(y.detach().cpu().numpy())
 
@@ -831,6 +837,52 @@ class DLRM_Net(nn.Module):
 
         return z
 
+class DLRM_Net_Moments(DLRM_Net):
+    def __init__(self, *args, **kwarg):
+        super(DLRM_Net_Moments, self).__init__(*args, **kwarg)
+
+    def apply_emb(self, batch_sample_offsets, batch_sparse_feature, emb_l, v_W_l, test, *args, **kwargs):
+        batch_size = kwargs['batch_size']
+        num_sparse_field = len(emb_l)
+        ly = []
+
+        for k in range(num_sparse_field):
+            s = k * batch_size
+            e = (k + 1) * batch_size + 1
+            sample_sparse_offset = batch_sample_offsets[s:e]
+            sample_sparse_feature_index_s = sample_sparse_offset[0]
+            sample_sparse_feature_index_e = sample_sparse_offset[-1]
+            sample_sparse_features = batch_sparse_feature[sample_sparse_feature_index_s:sample_sparse_feature_index_e]
+            sample_sparse_offset = sample_sparse_offset - sample_sparse_feature_index_s
+            # embedding lookup
+            # We are using EmbeddingBag, which implicitly uses sum operator.
+            # The embeddings are represented as tall matrices, with sum
+            # happening vertically across 0 axis, resulting in a row vector
+            # E = emb_l[k]
+
+            per_sample_weights = None
+
+            E = emb_l[k]
+            if (self.sketch_emb[k] == True):
+                V = E(
+                    sample_sparse_features,
+                    sample_sparse_offset,
+                    per_sample_weights=per_sample_weights,
+                    test=test,
+                )
+            else:
+
+                V = E(
+                    sample_sparse_features.to(self.device),
+                    sample_sparse_offset.to(self.device),
+                    per_sample_weights=per_sample_weights,
+                )
+
+            ly.append(V)
+
+        # print(ly)
+        return ly
+
 
 def dash_separated_ints(value):
     vals = value.split("-")
@@ -839,7 +891,7 @@ def dash_separated_ints(value):
             int(val)
         except ValueError:
             raise argparse.ArgumentTypeError(
-                "%s is not a valid dash separated list of ints" % value
+                "%s is not a np.testd dash separated list of ints" % value
             )
 
     return value
@@ -878,20 +930,29 @@ def inference(
         # early exit if nbatches was set by the user and was exceeded
         if nbatches > 0 and i >= nbatches:
             break
-        X_test, lS_o_test, lS_i_test, T_test, W_test, CBPP_test = unpack_batch(
-            testBatch
-        )
-        # forward pass
-        Z_test = dlrm_wrap(
-            X_test,
-            lS_o_test,
-            lS_i_test,
-            use_gpu,
-            device,
-            ndevices=ndevices,
-            test=test,
-            sk_flag=sk_flag,
-        )
+        if args.data_set == "moments":
+            batch_dense_features, batch_sample_offsets, batch_sparse_feature, labels_test = testBatch
+            batch_size = labels_test.shape[0]
+            labels_test = labels_test.view(-1, 1)
+            Z_test = dlrm_wrap_moments(batch_dense_features, batch_sample_offsets, batch_sparse_feature, use_gpu, device, ndevices=ndevices, test=test, sk_flag=sk_flag, batch_size=batch_size)
+        else:
+            X_test, lS_o_test, lS_i_test, labels_test, W_test, CBPP_test = unpack_batch(
+                testBatch
+            )
+
+
+            # forward pass
+
+            Z_test = dlrm_wrap(
+                X_test,
+                lS_o_test,
+                lS_i_test,
+                use_gpu,
+                device,
+                ndevices=ndevices,
+                test=test,
+                sk_flag=sk_flag,
+            )
         if Z_test.is_cuda:
             torch.cuda.synchronize()
 
@@ -899,13 +960,13 @@ def inference(
             # compute loss and accuracy
 
             S_test = Z_test.detach().cpu().numpy()  # numpy array
-            T_test = T_test.detach().cpu().numpy()  # numpy array
+            labels_test = labels_test.detach().cpu().numpy()  # numpy array
             scores.append(S_test)
-            targets.append(T_test)
+            targets.append(labels_test)
 
-            mbs_test = T_test.shape[0]  # = mini_batch_size except last
+            mbs_test = labels_test.shape[0]  # = mini_batch_size except last
             A_test = np.sum(
-                (np.round(S_test, 0) == T_test).astype(np.uint8))
+                (np.round(S_test, 0) == labels_test).astype(np.uint8))
 
             test_accu += A_test
             test_samp += mbs_test
@@ -972,6 +1033,10 @@ def run():
     parser = argparse.ArgumentParser(
         description="Train Deep Learning Recommendation Model (DLRM)"
     )
+    # Modify data-set choices to include moments
+    parser.add_argument("--data-set", type=str,
+                       choices=["kaggle", "terabyte", "avazu", "kdd12", "moments"],
+                       default="kaggle")
     # model related parameters
     parser.add_argument("--arch-sparse-feature-size", type=int, default=2)
     parser.add_argument(
@@ -1029,8 +1094,6 @@ def run():
     parser.add_argument("--rand-data-sigma", type=float, default=1)
     parser.add_argument("--data-trace-file", type=str,
                         default="./input/dist_emb_j.log")
-    parser.add_argument("--data-set", type=str,
-                        default="kaggle")  # or terabyte
     parser.add_argument("--raw-data-file", type=str, default="")
     parser.add_argument("--processed-data-file", type=str,
                         default="../criteo/kaggle_processed_sparse.bin")
@@ -1119,6 +1182,12 @@ def run():
     # frequency-based pruning
     parser.add_argument("--freq-prune-flag", action="store_true", default=False)
 
+    # Add these to the argument parser
+    parser.add_argument("--samples-path", type=str, default='datasets/moments/processed/samples_processed.pkl')
+    parser.add_argument("--labels-path", type=str, default='datasets/moments/processed/labels.pkl')
+    parser.add_argument("--metadata-path", type=str, default='datasets/moments/processed/metadata.json')
+    parser.add_argument("--feature-maps-path", type=str, default='datasets/moments/processed/global_feature_maps.pkl')
+
     global args
     global nbatches
     global nbatches_test
@@ -1179,38 +1248,45 @@ def run():
 
     ### prepare training data ###
     # the bottom mlp architecture
-    ln_bot = np.fromstring(args.arch_mlp_bot, dtype=int, sep="-")
+    emb_dims_bottom_mlp: np.ndarray[int] = np.fromstring(args.arch_mlp_bot, dtype=int, sep="-")
     # input data
 
     if args.data_generation == "dataset":
-        train_data, train_ld, test_data, test_ld = dp.make_criteo_data_and_loaders(
-            args)
-#        table_feature_map = {idx: idx for idx in range(len(train_data.counts))}
-        hot_cats = train_data.hot_cats
+        if args.data_set == "moments":
+            # Use Moment dataset
+            train_data, train_ld, test_ld = dp.make_moments_data_and_loaders(args)
+            field_num_feats: Tensor[int] = train_data.num_feat_per_field
+            dense_dim: Tensor[int] = train_data.dense_dim  # Number of dense features
+            emb_dims_bottom_mlp[0] = dense_dim
+            hot_cats = None
+        else:
+            # Use original datasets (Criteo, Avazu, KDD12)
+            train_data, train_ld, test_data, test_ld = dp.make_criteo_data_and_loaders(args)
+            hot_cats = train_data.hot_cats
+            field_num_feats = train_data.counts
+            if args.data_set in ['kaggle', 'terabyte']:
+                dense_dim = 13
+                emb_dims_bottom_mlp[0] = 13
+            if args.data_set in ['avazu', 'kdd12']:
+                dense_dim = 0
+                emb_dims_bottom_mlp[0] = 0
+
         nbatches = args.num_batches if args.num_batches > 0 else len(train_ld)
         nbatches_test = len(test_ld)
-        # ln_emb is the number of unique values in each categorical feature
-        ln_emb = train_data.counts
-        print(ln_emb)
+
         hash_rate = 0
         # enforce maximum limit on number of vectors per embedding
         if args.max_ind_range > 0:
-            ln_emb = np.array(
+            field_num_feats = np.array(
                 list(
                     map(
                         lambda x: x if x < args.max_ind_range else args.max_ind_range,
-                        ln_emb,
+                        field_num_feats,
                     )
                 )
             )
         else:
-            ln_emb = np.array(ln_emb)
-        if args.data_set == 'kaggle' or args.data_set == 'terabyte':
-            m_den = 13
-            ln_bot[0] = 13
-        if args.data_set == 'avazu' or args.data_set == 'kdd12':
-            m_den = 0
-            ln_bot[0] = 0
+            field_num_feats = np.array(field_num_feats)
 
     """
     else:
@@ -1224,26 +1300,26 @@ def run():
         nbatches_test = len(test_ld)
     """
 
-    args.ln_emb = ln_emb.tolist()
+    args.ln_emb = field_num_feats.tolist()
 
     ### parse command line arguments ###
     m_spa = args.arch_sparse_feature_size
     hotn = 0
     if args.sketch_flag:
-        totn = sum(ln_emb)
+        totn = sum(field_num_feats)
         hotn = int(totn * args.compress_rate * (1 - args.hash_rate)
                    * (m_spa * 4 / (m_spa * 4 + 48))) # TODO: why this formula?
         hash_rate = args.compress_rate * args.hash_rate
         print(f"hash_rate: {hash_rate}, hotn: {hotn}")
-    ln_emb = np.asarray(ln_emb)
+    field_num_feats = np.asarray(field_num_feats)
     if args.data_set != 'avazu' and args.data_set != 'kdd12':
-        num_fea = ln_emb.size + 1  # num sparse + num dense features
+        num_fea = field_num_feats.size + 1  # num sparse + num dense features
     else:
-        num_fea = ln_emb.size
+        num_fea = field_num_feats.size
     if args.data_set == 'avazu' or args.data_set == 'kdd12':
         m_den_out = 0
     else:
-        m_den_out = ln_bot[ln_bot.size - 1]
+        m_den_out = emb_dims_bottom_mlp[emb_dims_bottom_mlp.size - 1]
     if args.arch_interaction_op == "dot":
         # approach 1: all
         # num_int = num_fea * num_fea + m_den_out
@@ -1265,12 +1341,12 @@ def run():
     ln_top = np.fromstring(arch_mlp_top_adjusted, dtype=int, sep="-")
 
     # sanity check: feature sizes and mlp dimensions must match
-    if m_den != ln_bot[0]:
+    if dense_dim != emb_dims_bottom_mlp[0]:
         sys.exit(
             "ERROR: arch-dense-feature-size "
-            + str(m_den)
+            + str(dense_dim)
             + " does not match first dim of bottom mlp "
-            + str(ln_bot[0])
+            + str(emb_dims_bottom_mlp[0])
         )
 
     if args.qr_flag and args.data_set != 'avazu' and args.data_set != 'kdd12':
@@ -1312,18 +1388,18 @@ def run():
         while r - l > 0.0001:
             mid = (l + r) / 2
             m_spa_ = md_solver(
-                torch.tensor(ln_emb),
+                torch.tensor(field_num_feats),
                 mid,  # alpha
                 d0=m_spa,
                 round_dim=args.md_round_dims,
             ).tolist()
-            cr = sum(m_spa_ * ln_emb) / (np.sum(ln_emb) * m_spa)
+            cr = sum(m_spa_ * field_num_feats) / (np.sum(field_num_feats) * m_spa)
             if cr > args.compress_rate:
                 l = mid
             else:
                 r = mid
         m_spa = md_solver(
-            torch.tensor(ln_emb),
+            torch.tensor(field_num_feats),
             r,  # alpha
             d0=m_spa,
             round_dim=args.md_round_dims,
@@ -1342,28 +1418,28 @@ def run():
         print(num_int)
         print(
             "mlp bot arch "
-            + str(ln_bot.size - 1)
+            + str(emb_dims_bottom_mlp.size - 1)
             + " layers, with input to output dimensions:"
         )
-        print(ln_bot)
+        print(emb_dims_bottom_mlp)
         print("# of features (sparse and dense)")
         print(num_fea)
         print("dense feature size")
-        print(m_den)
+        print(dense_dim)
         print("sparse feature size")
         print(m_spa)
         print(
             "# of embeddings (= # of sparse features) "
-            + str(ln_emb.size)
+            + str(field_num_feats.size)
             + ", with dimensions "
             + str(m_spa)
             + "x:"
         )
-        print(ln_emb)
+        print(field_num_feats)
 
         print("data (inputs and targets):")
         for j, inputBatch in enumerate(train_ld):
-            X, lS_o, lS_i, T, W, CBPP = unpack_batch(inputBatch)
+            X, lS_o, lS_i, batch_labels, W, CBPP = unpack_batch(inputBatch)
 
             torch.set_printoptions(precision=4)
             # early exit if nbatches was set by the user and has been exceeded
@@ -1383,7 +1459,7 @@ def run():
                 )
             )
             print([S_i.detach().cpu() for S_i in lS_i])
-            print(T.detach().cpu())
+            print(batch_labels.detach().cpu())
 
     global ndevices
     ndevices = min(ngpus, args.mini_batch_size, num_fea - 1) if use_gpu else -1
@@ -1397,7 +1473,11 @@ def run():
         os.system("g++ -fPIC -shared -o tricks/sklib.so -g -rdynamic -mavx2 -mbmi -mavx512bw -mavx512dq --std=c++17 -O3 -fopenmp tricks/sketch.cpp")
         lib = ctypes.CDLL('./tricks/sklib.so')
     global dlrm
-    dlrm = DLRM_Net(
+    if args.data_generation == "dataset" and args.data_set == "moments":
+        model_class = DLRM_Net_Moments
+    else:
+        model_class = DLRM_Net
+    dlrm = model_class(
         args.compress_rate,
         args.ada_flag,
         lib,
@@ -1406,8 +1486,8 @@ def run():
         args.sketch_flag,
         hash_rate,
         m_spa,
-        ln_emb,
-        ln_bot,
+        field_num_feats,
+        emb_dims_bottom_mlp,
         ln_top,
         arch_interaction_op=args.arch_interaction_op,
         arch_interaction_itself=args.arch_interaction_itself,
@@ -1443,7 +1523,7 @@ def run():
         dlrm = dlrm.to(device)  # .cuda()
         if dlrm.ndevices > 1:
             dlrm.emb_l, dlrm.v_W_l = dlrm.create_emb(
-                m_spa, ln_emb, args.weighted_pooling
+                m_spa, field_num_feats, args.weighted_pooling
             )
         else:
             if dlrm.weighted_pooling == "fixed":
@@ -1593,61 +1673,55 @@ def run():
 
                     if j < skip_upto_batch:
                         continue
-                    X, lS_o, lS_i, T, W, CBPP = unpack_batch(inputBatch)
-                    t3 = t1
-                    t1 = time_wrap(use_gpu)
+                    if args.data_generation == "dataset" and args.data_set == "moments":
+                        batch_dense_features, batch_sample_offsets, batch_sparse_feature, batch_labels = inputBatch
+                        assert batch_dense_features.shape[0] == batch_labels.shape[0]
+                        # reshape batch_labels to be a column vector, to match the output shape of dlrm_wrap_moment
+                        batch_labels = batch_labels.view(-1, 1)
+                        batch_size = batch_dense_features.shape[0]
+                        t3 = t1
+                        t1 = time_wrap(use_gpu)
 
-                    # early exit if nbatches was set by the user and has been exceeded
-                    if nbatches > 0 and j >= nbatches:
-                        break
+                        # early exit if nbatches was set by the user and has been exceeded
+                        if nbatches > 0 and j >= nbatches:
+                            break
 
-                    # = args.mini_batch_size except maybe for last
-                    mbs = T.shape[0]
+                        Z = dlrm_wrap_moments(batch_dense_features, batch_sample_offsets, batch_sparse_feature, use_gpu, device, ndevices=ndevices, test=False, sk_flag=args.sketch_flag, batch_size=batch_size)
 
-                    # forward pass
-                    Z = dlrm_wrap(
-                        X,
-                        lS_o,
-                        lS_i,
-                        use_gpu,
-                        device,
-                        ndevices=ndevices,
-                        test=False,
-                        sk_flag=args.sketch_flag,
-                    )
+
+                    else:
+                        X, lS_o, lS_i, batch_labels, W, CBPP = unpack_batch(inputBatch)
+                        t3 = t1
+                        t1 = time_wrap(use_gpu)
+
+                        # early exit if nbatches was set by the user and has been exceeded
+                        if nbatches > 0 and j >= nbatches:
+                            break
+
+                        # = args.mini_batch_size except maybe for last
+                        batch_size = batch_labels.size(0)
+
+                        # forward pass
+                        Z = dlrm_wrap(
+                            X,
+                            lS_o,
+                            lS_i,
+                            use_gpu,
+                            device,
+                            ndevices=ndevices,
+                            test=False,
+                            sk_flag=args.sketch_flag,
+                        )
 
                     # loss
-                    E = loss_fn_wrap(Z, T, use_gpu, device)
+                    E = loss_fn_wrap(Z, batch_labels, use_gpu, device)
 
-                    # compute loss and accuracy
                     L = E.detach().cpu().numpy()  # numpy array
-                    # training accuracy is not disabled
-                    # S = Z.detach().cpu().numpy()  # numpy array
-                    # T = T.detach().cpu().numpy()  # numpy array
-
-                    # # print("res: ", S)
-
-                    # # print("j, train: BCE ", j, L)
-
-                    # mbs = T.shape[0]  # = args.mini_batch_size except maybe for last
-                    # A = np.sum((np.round(S, 0) == T).astype(np.uint8))
 
                     with record_function("DLRM backward"):
-                        # scaled error gradient propagation
-                        # (where we do not accumulate gradients across mini-batches)
                         optimizer.zero_grad()
                         # backward pass
                         E.backward()
-                        # grad_num = 0
-                        # grad_offset = 0
-                        # for name, parms in dlrm.named_parameters():
-                        #     print('-->name:', name)
-                        #     print('-->para:', torch.max(parms), torch.min(parms))
-                        #     #print('-->grad_requirs:',parms.requires_grad)
-                        #     print('-->grad_value:', parms.grad.shape, parms.grad, parms.grad.indices)
-                        #     grad_num += 1
-                        #     if grad_num == 26:
-                        #         break
                         if args.sketch_flag:
                             dlrm.insert_grad(lS_i)
                         if args.ada_flag:
@@ -1658,9 +1732,9 @@ def run():
 
                     total_time += t1 - t3
 
-                    total_loss += L * mbs
+                    total_loss += L * batch_size
                     total_iter += 1
-                    total_samp += mbs
+                    total_samp += batch_size
 
                     should_print = ((j + 1) % args.print_freq == 0) or (
                         j + 1 == nbatches
